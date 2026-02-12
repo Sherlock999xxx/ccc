@@ -27,6 +27,7 @@ type Config struct {
 	RelayURL         string                  `json:"relay_url,omitempty"`         // Relay server URL for large file transfers
 	Away             bool                    `json:"away"`
 	OAuthToken       string                  `json:"oauth_token,omitempty"`
+	OTPSecret        string                  `json:"otp_secret,omitempty"`        // TOTP secret for safe mode
 }
 
 // TelegramMessage represents a Telegram message
@@ -103,27 +104,46 @@ type TopicResult struct {
 
 // HookData represents data received from Claude hook
 type HookData struct {
-	Cwd              string `json:"cwd"`
-	TranscriptPath   string `json:"transcript_path"`
-	SessionID        string `json:"session_id"`
-	HookEventName    string `json:"hook_event_name"`
-	ToolName         string `json:"tool_name"`
-	Prompt           string `json:"prompt"`            // For UserPromptSubmit hook
-	Message          string `json:"message"`           // For Notification hook
-	Title            string `json:"title"`             // For Notification hook
-	NotificationType string `json:"notification_type"` // For Notification hook
-	StopHookActive   bool   `json:"stop_hook_active"`  // For Stop hook
-	ToolInput        struct {
-		Questions []struct {
-			Question    string `json:"question"`
-			Header      string `json:"header"`
-			MultiSelect bool   `json:"multiSelect"`
-			Options     []struct {
-				Label       string `json:"label"`
-				Description string `json:"description"`
-			} `json:"options"`
-		} `json:"questions"`
-	} `json:"tool_input"`
+	Cwd              string          `json:"cwd"`
+	TranscriptPath   string          `json:"transcript_path"`
+	SessionID        string          `json:"session_id"`
+	HookEventName    string          `json:"hook_event_name"`
+	ToolName         string          `json:"tool_name"`
+	Prompt           string          `json:"prompt"`            // For UserPromptSubmit hook
+	Message          string          `json:"message"`           // For Notification hook
+	Title            string          `json:"title"`             // For Notification hook
+	NotificationType string          `json:"notification_type"` // For Notification hook
+	StopHookActive   bool            `json:"stop_hook_active"`  // For Stop hook
+	ToolInputRaw     json.RawMessage `json:"tool_input"`        // Raw tool input JSON
+	ToolInput        HookToolInput   `json:"-"`                 // Parsed from ToolInputRaw
+}
+
+// HookToolInput holds parsed tool input for known tool types
+type HookToolInput struct {
+	Questions []struct {
+		Question    string `json:"question"`
+		Header      string `json:"header"`
+		MultiSelect bool   `json:"multiSelect"`
+		Options     []struct {
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
+	} `json:"questions"`
+	Command     string `json:"command,omitempty"`     // For Bash
+	Description string `json:"description,omitempty"` // For Bash
+	FilePath    string `json:"file_path,omitempty"`   // For Read/Write/Edit
+}
+
+// parseHookData unmarshals raw JSON and populates ToolInput
+func parseHookData(data []byte) (HookData, error) {
+	var hd HookData
+	if err := json.Unmarshal(data, &hd); err != nil {
+		return hd, err
+	}
+	if len(hd.ToolInputRaw) > 0 {
+		json.Unmarshal(hd.ToolInputRaw, &hd.ToolInput)
+	}
+	return hd, nil
 }
 
 // InlineKeyboardButton represents a Telegram inline keyboard button
@@ -205,6 +225,11 @@ func main() {
 			} else {
 				fmt.Println("transcription_lang: not set (auto-detect)")
 			}
+			if isOTPEnabled(config) {
+				fmt.Println("otp: enabled")
+			} else {
+				fmt.Println("otp: disabled (enable with: ccc setup <bot_token>)")
+			}
 			fmt.Println("\nUsage: ccc config <key> <value>")
 			fmt.Println("  ccc config projects-dir ~/Projects")
 			fmt.Println("  ccc config oauth-token <token>")
@@ -234,6 +259,12 @@ func main() {
 					fmt.Println(config.TranscriptionLang)
 				} else {
 					fmt.Println("not set (auto-detect)")
+				}
+			case "otp":
+				if isOTPEnabled(config) {
+					fmt.Println("enabled")
+				} else {
+					fmt.Println("disabled")
 				}
 			default:
 				fmt.Fprintf(os.Stderr, "Unknown config key: %s\n", key)
@@ -271,6 +302,9 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Printf("✅ Transcription language set to: %s\n", value)
+		case "otp":
+			fmt.Fprintf(os.Stderr, "Permission mode can only be changed via: ccc setup <bot_token>\n")
+			os.Exit(1)
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown config key: %s\n", key)
 			os.Exit(1)
@@ -300,7 +334,8 @@ func main() {
 		}
 
 	case "hook-question":
-		if err := handleQuestionHook(); err != nil {
+		// Legacy: redirect to permission hook
+		if err := handlePermissionHook(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

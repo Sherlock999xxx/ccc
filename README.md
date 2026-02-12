@@ -144,6 +144,7 @@ That's it! You're ready to control Claude Code from Telegram.
 | `ccc doctor` | Check all dependencies and configuration |
 | `ccc config` | Show current configuration |
 | `ccc config projects-dir <path>` | Set base directory for new projects |
+| `ccc config otp` | Check OTP permission mode status |
 | `ccc --help` | Show help |
 | `ccc --version` | Show version |
 
@@ -353,6 +354,7 @@ Config is stored in `~/.ccc.json`:
 | `sessions` | Map of session names to topic ID and project path |
 | `projects_dir` | Base directory for new projects (default: `~`) |
 | `transcription_cmd` | Command for voice transcription (optional) |
+| `otp_secret` | TOTP secret for OTP permission mode (set via `ccc config otp enable`) |
 | `away` | When true, notifications are sent |
 
 > **Note**: Session paths are stored at creation time. Changing `projects_dir` only affects new sessions.
@@ -476,7 +478,38 @@ The only external communication is:
 - **Config permissions**: `~/.ccc.json` is created with `0600` (owner-only)
 - **Open source**: Full code transparency, audit it yourself
 
-> ⚠️ Note: Uses `--dangerously-skip-permissions` for automation - understand the implications
+### Permission Modes
+
+ccc supports two permission modes for controlling how Claude Code handles tool approvals in remote sessions:
+
+#### Auto-approve mode (default)
+
+All permissions are automatically approved. Claude Code works without interruptions. This is the behavior when OTP is not configured.
+
+#### OTP mode (secure)
+
+When enabled, Claude's permission requests from Telegram-initiated actions require a TOTP code (like Google Authenticator) to approve. Local sessions keep their normal interactive permission UI.
+
+The permission mode is configured during setup:
+```bash
+ccc setup YOUR_BOT_TOKEN  # step 1 lets you choose the mode
+```
+
+Check current mode:
+```bash
+ccc config otp  # shows "enabled" or "disabled"
+```
+
+**How permissions are handled in each scenario:**
+
+| Scenario | Behavior |
+|----------|----------|
+| OTP disabled | Auto-approve all |
+| Local input (terminal) | Claude shows its normal permission UI |
+| Telegram input (remote) | Requires OTP code via Telegram |
+| Non-ccc session (e.g. other tools) | Claude shows its normal permission UI |
+
+When OTP is required, the bot sends a permission request to Telegram showing the tool and input. Reply with your 6-digit TOTP code to approve, or let it timeout (5 min) to deny.
 
 ## Troubleshooting
 

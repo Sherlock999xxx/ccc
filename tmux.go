@@ -95,7 +95,17 @@ func runClaudeRaw(continueSession bool) error {
 		return fmt.Errorf("claude binary not found")
 	}
 
-	args := []string{"--dangerously-skip-permissions"}
+	// Clean stale Telegram flag from previous sessions.
+	// This ensures a locally started session doesn't inherit a flag
+	// left behind when a previous session's stop hook didn't fire.
+	if tmuxName, err := exec.Command(tmuxPath, "display-message", "-p", "#{session_name}").Output(); err == nil {
+		name := strings.TrimSpace(string(tmuxName))
+		if name != "" {
+			os.Remove(telegramActiveFlag(name))
+		}
+	}
+
+	var args []string
 	if continueSession {
 		args = append(args, "-c")
 	}
@@ -131,6 +141,18 @@ func waitForClaude(session string, timeout time.Duration) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for Claude to start")
+}
+
+// sendToTmuxFromTelegram sets the Telegram active flag before sending,
+// so the permission hook knows this input came from Telegram and requires OTP.
+func sendToTmuxFromTelegram(session string, text string) error {
+	os.WriteFile(telegramActiveFlag(session), []byte("1"), 0600)
+	return sendToTmux(session, text)
+}
+
+func sendToTmuxFromTelegramWithDelay(session string, text string, delay time.Duration) error {
+	os.WriteFile(telegramActiveFlag(session), []byte("1"), 0600)
+	return sendToTmuxWithDelay(session, text, delay)
 }
 
 func sendToTmux(session string, text string) error {

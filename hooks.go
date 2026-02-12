@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// telegramActiveFlag returns the path of the flag file that indicates
+// a Telegram message is being processed by a tmux session.
+func telegramActiveFlag(tmuxName string) string {
+	return "/tmp/ccc-telegram-active-" + tmuxName
+}
+
 // readHookStdin reads stdin JSON with a timeout
 func readHookStdin() ([]byte, error) {
 	stdinData := make(chan []byte, 1)
@@ -49,8 +55,8 @@ func handleStopHook() error {
 		return nil
 	}
 
-	var hookData HookData
-	if err := json.Unmarshal(rawData, &hookData); err != nil {
+	hookData, err := parseHookData(rawData)
+	if err != nil {
 		return nil
 	}
 
@@ -65,6 +71,10 @@ func handleStopHook() error {
 	}
 
 	hookLog("stop-hook: session=%s transcript=%s", sessName, hookData.TranscriptPath)
+
+	// Clear Telegram active flag when Claude stops
+	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
+	os.Remove(telegramActiveFlag(tmuxName))
 
 	blocks := extractLastTurn(hookData.TranscriptPath)
 	if len(blocks) == 0 {
@@ -246,8 +256,8 @@ func handlePermissionHook() error {
 		return nil
 	}
 
-	var hookData HookData
-	if err := json.Unmarshal(rawData, &hookData); err != nil {
+	hookData, err := parseHookData(rawData)
+	if err != nil {
 		return nil
 	}
 
@@ -261,126 +271,145 @@ func handlePermissionHook() error {
 		return nil
 	}
 
-	// Handle AskUserQuestion
+	// Handle AskUserQuestion - forward to Telegram with buttons
 	if hookData.ToolName == "AskUserQuestion" && len(hookData.ToolInput.Questions) > 0 {
-		go func() {
-			defer func() { recover() }()
-			for qIdx, q := range hookData.ToolInput.Questions {
-				if q.Question == "" {
+		for qIdx, q := range hookData.ToolInput.Questions {
+			if q.Question == "" {
+				continue
+			}
+			msg := fmt.Sprintf("❓ %s\n\n%s", q.Header, q.Question)
+
+			var buttons [][]InlineKeyboardButton
+			for i, opt := range q.Options {
+				if opt.Label == "" {
 					continue
 				}
-				msg := fmt.Sprintf("❓ %s\n\n%s", q.Header, q.Question)
-
-				var buttons [][]InlineKeyboardButton
-				for i, opt := range q.Options {
-					if opt.Label == "" {
-						continue
-					}
-					totalQuestions := len(hookData.ToolInput.Questions)
-					callbackData := fmt.Sprintf("%s:%d:%d:%d", sessName, qIdx, totalQuestions, i)
-					if len(callbackData) > 64 {
-						callbackData = callbackData[:64]
-					}
-					buttons = append(buttons, []InlineKeyboardButton{
-						{Text: opt.Label, CallbackData: callbackData},
-					})
+				totalQuestions := len(hookData.ToolInput.Questions)
+				callbackData := fmt.Sprintf("%s:%d:%d:%d", sessName, qIdx, totalQuestions, i)
+				if len(callbackData) > 64 {
+					callbackData = callbackData[:64]
 				}
-
-				if len(buttons) > 0 {
-					sendMessageWithKeyboard(config, config.GroupID, topicID, msg, buttons)
-				}
+				buttons = append(buttons, []InlineKeyboardButton{
+					{Text: opt.Label, CallbackData: callbackData},
+				})
 			}
-		}()
+
+			if len(buttons) > 0 {
+				sendMessageWithKeyboard(config, config.GroupID, topicID, msg, buttons)
+			}
+		}
 		return nil
+	}
+
+	// OTP permission check for all other tools
+	if !isOTPEnabled(config) {
+		// No OTP configured, auto-allow everything
+		outputPermissionDecision("allow", "OTP not configured")
+		return nil
+	}
+
+	// OTP only applies when input came from Telegram (flag file exists and is recent).
+	// The listener sets this flag before forwarding Telegram messages to tmux.
+	// Flag auto-expires after 5 minutes to handle cases where stop hook didn't fire.
+	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
+	flagInfo, err := os.Stat(telegramActiveFlag(tmuxName))
+	if err != nil || time.Since(flagInfo.ModTime()) > otpGrantDuration {
+		return nil // no flag or expired, let Claude handle permissions normally
+	}
+
+	// Check for a valid OTP grant (approved within the last 5 minutes)
+	if hasValidOTPGrant(tmuxName) {
+		outputPermissionDecision("allow", "OTP grant still valid")
+		return nil
+	}
+
+	// Build a human-readable description of what Claude wants to do
+	toolDesc := hookData.ToolName
+	var inputStr string
+	switch hookData.ToolName {
+	case "Bash":
+		if hookData.ToolInput.Command != "" {
+			inputStr = hookData.ToolInput.Command
+		}
+	case "Read":
+		if hookData.ToolInput.FilePath != "" {
+			inputStr = hookData.ToolInput.FilePath
+		}
+	case "Write", "Edit":
+		if hookData.ToolInput.FilePath != "" {
+			inputStr = hookData.ToolInput.FilePath
+		}
+	}
+	if inputStr == "" {
+		inputStr = string(hookData.ToolInputRaw)
+	}
+	if len(inputStr) > 500 {
+		inputStr = inputStr[:500] + "..."
+	}
+
+	// Use session_id from hook data as unique identifier
+	sessionID := hookData.SessionID
+	if sessionID == "" {
+		sessionID = sessName
+	}
+
+	// Only the first parallel hook sends the Telegram message.
+	// If a request file already exists (from another parallel hook), just wait.
+	alreadyRequested := false
+	if info, err := os.Stat(otpRequestPrefix + sessionID); err == nil {
+		alreadyRequested = time.Since(info.ModTime()) < 30*time.Second
+	}
+
+	req := &OTPPermissionRequest{
+		SessionName: sessName,
+		ToolName:    hookData.ToolName,
+		ToolInput:   inputStr,
+		Timestamp:   time.Now().Unix(),
+	}
+	writeOTPRequest(sessionID, req)
+
+	if !alreadyRequested {
+		msg := fmt.Sprintf("🔐 Permission request:\n\n🔧 %s\n📋 %s\n\nSend your OTP code to approve:", toolDesc, inputStr)
+		sendMessage(config, config.GroupID, topicID, msg)
+	}
+
+	hookLog("otp-request: waiting for OTP response for session=%s tool=%s already=%v", sessName, hookData.ToolName, alreadyRequested)
+
+	// Wait for OTP response from listener
+	approved, err := waitForOTPResponse(sessionID, tmuxName, otpPermissionTimeout)
+	if err != nil {
+		hookLog("otp-request: timeout or error: %v", err)
+		sendMessage(config, config.GroupID, topicID, "⏰ OTP timeout - permission denied")
+		outputPermissionDecision("deny", "OTP approval timed out")
+		return nil
+	}
+
+	if approved {
+		hookLog("otp-request: approved for session=%s tool=%s", sessName, hookData.ToolName)
+		writeOTPGrant(tmuxName)
+		outputPermissionDecision("allow", "Approved via OTP")
+	} else {
+		hookLog("otp-request: denied for session=%s tool=%s", sessName, hookData.ToolName)
+		outputPermissionDecision("deny", "Denied via OTP")
 	}
 
 	return nil
 }
 
-func handleQuestionHook() error {
-	config, err := loadConfig()
-	if err != nil {
-		return nil
+// outputPermissionDecision writes the PreToolUse hook response to stdout
+func outputPermissionDecision(decision, reason string) {
+	response := map[string]interface{}{
+		"hookSpecificOutput": map[string]interface{}{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       decision,
+			"permissionDecisionReason": reason,
+		},
 	}
-
-	rawData, _ := io.ReadAll(os.Stdin)
-	if len(rawData) == 0 {
-		return nil
-	}
-
-	var hookData HookData
-	if err := json.Unmarshal(rawData, &hookData); err != nil {
-		return nil
-	}
-
-	sessName, topicID := findSession(config, hookData.Cwd)
-	if sessName == "" || config.GroupID == 0 || topicID == 0 {
-		return nil
-	}
-
-	for qIdx, q := range hookData.ToolInput.Questions {
-		if q.Question == "" {
-			continue
-		}
-		msg := fmt.Sprintf("❓ %s\n\n%s", q.Header, q.Question)
-
-		var buttons [][]InlineKeyboardButton
-		for i, opt := range q.Options {
-			if opt.Label == "" {
-				continue
-			}
-			totalQuestions := len(hookData.ToolInput.Questions)
-			callbackData := fmt.Sprintf("%s:%d:%d:%d", sessName, qIdx, totalQuestions, i)
-			if len(callbackData) > 64 {
-				callbackData = callbackData[:64]
-			}
-			buttons = append(buttons, []InlineKeyboardButton{
-				{Text: opt.Label, CallbackData: callbackData},
-			})
-		}
-
-		if len(buttons) > 0 {
-			sendMessageWithKeyboard(config, config.GroupID, topicID, msg, buttons)
-		} else {
-			sendMessage(config, config.GroupID, topicID, msg)
-		}
-	}
-
-	return nil
+	data, _ := json.Marshal(response)
+	fmt.Println(string(data))
 }
 
 func handleNotificationHook() error {
-	defer func() { recover() }()
-
-	rawData, _ := readHookStdin()
-	if len(rawData) == 0 {
-		return nil
-	}
-
-	var hookData HookData
-	if err := json.Unmarshal(rawData, &hookData); err != nil {
-		return nil
-	}
-
-	config, err := loadConfig()
-	if err != nil || config == nil {
-		return nil
-	}
-
-	sessName, topicID := findSession(config, hookData.Cwd)
-	if sessName == "" || config.GroupID == 0 || topicID == 0 {
-		return nil
-	}
-
-	title := hookData.Title
-	message := hookData.Message
-	if title == "" && message == "" {
-		return nil
-	}
-
-	text := fmt.Sprintf("🔔 %s\n\n%s", title, message)
-	sendMessage(config, config.GroupID, topicID, strings.TrimSpace(text))
-
 	return nil
 }
 
@@ -439,11 +468,12 @@ func installHook() error {
 			map[string]interface{}{
 				"hooks": []interface{}{
 					map[string]interface{}{
-						"command": cccPath + " hook-question",
+						"command": cccPath + " hook-permission",
 						"type":    "command",
+						"timeout": 300000,
 					},
 				},
-				"matcher": "AskUserQuestion",
+				"matcher": "",
 			},
 		},
 		"Stop": {
@@ -451,16 +481,6 @@ func installHook() error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"command": cccPath + " hook-stop",
-						"type":    "command",
-					},
-				},
-			},
-		},
-		"Notification": {
-			map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"command": cccPath + " hook-notification",
 						"type":    "command",
 					},
 				},

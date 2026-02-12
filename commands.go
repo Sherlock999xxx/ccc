@@ -16,10 +16,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/charmbracelet/huh"
 )
 
 var authInProgress sync.Mutex
 var authWaitingCode bool
+var otpAttempts = make(map[string]int) // session -> failed attempts
 
 // getSystemStats returns machine stats (works on Linux and macOS)
 func getSystemStats() string {
@@ -194,16 +197,83 @@ func runClaude(prompt string) (string, error) {
 	return strings.TrimSpace(output), err
 }
 
+func stopListenerService() {
+	home, _ := os.UserHomeDir()
+	if _, err := os.Stat("/Library"); err == nil {
+		// macOS - launchd
+		plistPath := filepath.Join(home, "Library", "LaunchAgents", "com.ccc.plist")
+		exec.Command("launchctl", "unload", plistPath).Run()
+	} else {
+		// Linux - systemd
+		exec.Command("systemctl", "--user", "stop", "ccc").Run()
+	}
+	// Also kill any manual listener via lock file PID
+	lockPath := filepath.Join(home, ".ccc.lock")
+	if data, err := os.ReadFile(lockPath); err == nil {
+		pidStr := strings.TrimSpace(string(data))
+		if pidStr != "" {
+			exec.Command("kill", pidStr).Run()
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+}
+
+func startListenerService() {
+	home, _ := os.UserHomeDir()
+	if _, err := os.Stat("/Library"); err == nil {
+		plistPath := filepath.Join(home, "Library", "LaunchAgents", "com.ccc.plist")
+		exec.Command("launchctl", "load", plistPath).Run()
+	} else {
+		exec.Command("systemctl", "--user", "start", "ccc").Run()
+	}
+}
+
 func setup(botToken string) error {
 	fmt.Println("🚀 Claude Code Companion Setup")
 	fmt.Println("==============================")
 	fmt.Println()
 
-	config := &Config{BotToken: botToken, Sessions: make(map[string]*SessionInfo)}
+	// Load existing config if present (preserve sessions, group, etc.)
+	config, _ := loadConfig()
+	if config == nil {
+		config = &Config{Sessions: make(map[string]*SessionInfo)}
+	}
+	config.BotToken = botToken
 
-	// Step 1: Get chat ID
-	fmt.Println("Step 1/4: Connecting to Telegram...")
-	fmt.Println("📱 Send any message to your bot in Telegram")
+	// Stop listener to avoid getUpdates conflict (409 Conflict)
+	fmt.Println("Stopping listener...")
+	stopListenerService()
+
+	// Step 1: Permission mode
+	fmt.Println("Step 1/6: Permission mode")
+	var permMode string
+	err := huh.NewSelect[string]().
+		Title("How should remote sessions handle permissions?").
+		Description("This controls what happens when Claude Code needs\npermission to run tools in Telegram-controlled sessions.").
+		Options(
+			huh.NewOption[string](
+				"Auto-approve\n"+
+					"  All permissions granted automatically. Claude works without\n"+
+					"  interruptions. Best for trusted environments where you control\n"+
+					"  physical access to your machine.",
+				"auto"),
+			huh.NewOption[string](
+				"OTP (secure)\n"+
+					"  Each permission requires a 6-digit TOTP code from your\n"+
+					"  authenticator app (Google Authenticator, Authy, etc.).\n"+
+					"  Local terminal sessions keep their normal interactive UI.",
+				"otp"),
+		).
+		Value(&permMode).
+		Run()
+	if err != nil {
+		return fmt.Errorf("selection cancelled: %w", err)
+	}
+	fmt.Println()
+
+	// Step 2: Get chat ID
+	fmt.Println("Step 2/6: Connecting to Telegram...")
+	fmt.Println("   📱 Send any message to your bot in Telegram")
 	fmt.Println("   Waiting...")
 
 	offset := 0
@@ -242,7 +312,7 @@ func setup(botToken string) error {
 
 step2:
 	// Step 2: Group setup (optional)
-	fmt.Println("Step 2/4: Group setup (optional)")
+	fmt.Println("Step 3/6: Group setup (optional)")
 	fmt.Println("   For session topics, create a Telegram group with Topics enabled,")
 	fmt.Println("   add your bot as admin, and send a message there.")
 	fmt.Println("   Or press Enter to skip...")
@@ -281,7 +351,7 @@ step2:
 
 step3:
 	// Step 3: Install Claude hook and skill
-	fmt.Println("Step 3/4: Installing Claude hook and skill...")
+	fmt.Println("Step 4/6: Installing Claude hook and skill...")
 	if err := installHook(); err != nil {
 		fmt.Printf("⚠️  Hook installation failed: %v\n", err)
 		fmt.Println("   You can install it later with: ccc install")
@@ -293,7 +363,7 @@ step3:
 	}
 
 	// Step 4: Install service
-	fmt.Println("Step 4/4: Installing background service...")
+	fmt.Println("Step 5/6: Installing background service...")
 	if err := installService(); err != nil {
 		fmt.Printf("⚠️  Service installation failed: %v\n", err)
 		fmt.Println("   You can start manually with: ccc listen")
@@ -301,7 +371,28 @@ step3:
 		fmt.Println()
 	}
 
+	// Step 6: Apply permission mode
+	fmt.Println("Step 6/6: Configuring permission mode...")
+	if permMode == "otp" {
+		msg, err := setupOTP(config)
+		if err != nil {
+			fmt.Printf("⚠️  OTP setup failed: %v\n", err)
+		} else {
+			fmt.Println()
+			fmt.Println(msg)
+			fmt.Println()
+			fmt.Println("   Save this secret! You'll need it to approve remote permission requests.")
+		}
+	} else {
+		config.OTPSecret = ""
+		if err := saveConfig(config); err != nil {
+			fmt.Printf("⚠️  Failed to save config: %v\n", err)
+		}
+		fmt.Println("✅ Auto-approve mode — all remote permissions granted automatically")
+	}
+
 	// Done!
+	fmt.Println()
 	fmt.Println("==============================")
 	fmt.Println("✅ Setup complete!")
 	fmt.Println()
@@ -319,6 +410,11 @@ step3:
 		fmt.Println("  2. Add bot as admin")
 		fmt.Println("  3. Run: ccc setgroup")
 	}
+
+	// Restart listener service
+	fmt.Println()
+	fmt.Println("Restarting listener...")
+	startListenerService()
 
 	return nil
 }
@@ -458,13 +554,10 @@ func doctor() {
 				if stop, has := hooks["Stop"].([]interface{}); has && len(stop) > 0 {
 					installed = append(installed, "Stop")
 				}
-				if notif, has := hooks["Notification"].([]interface{}); has && len(notif) > 0 {
-					installed = append(installed, "Notification")
-				}
 				if pre, has := hooks["PreToolUse"].([]interface{}); has && len(pre) > 0 {
 					installed = append(installed, "PreToolUse")
 				}
-				if len(installed) == 3 {
+				if len(installed) == 2 {
 					fmt.Printf("✅ installed (%s)\n", strings.Join(installed, ", "))
 				} else if len(installed) > 0 {
 					fmt.Printf("⚠️  partial (%s) - run: ccc install\n", strings.Join(installed, ", "))
@@ -536,6 +629,14 @@ func doctor() {
 		fmt.Println("✅ configured (from environment)")
 	} else {
 		fmt.Println("⚠️  not set (optional)")
+	}
+
+	// Check OTP (permission approval)
+	fmt.Print("OTP (permissions). ")
+	if config != nil && isOTPEnabled(config) {
+		fmt.Println("✅ enabled")
+	} else {
+		fmt.Println("⚠️  disabled (run: ccc setup <token> to enable)")
 	}
 
 	fmt.Println()
@@ -661,7 +762,7 @@ func listen() error {
 					continue
 				}
 
-				answerCallbackQuery(config, cb.ID)
+					answerCallbackQuery(config, cb.ID)
 
 				// Parse callback data: session:questionIndex:totalQuestions:optionIndex
 				parts := strings.Split(cb.Data, ":")
@@ -737,7 +838,7 @@ func listen() error {
 							} else if transcription != "" {
 								fmt.Printf("[voice] @%s: %s\n", msg.From.Username, transcription)
 								sendMessage(config, chatID, threadID, fmt.Sprintf("📝 %s", transcription))
-								sendToTmux(tmuxName, "[Audio transcription, may contain errors]: "+transcription)
+								sendToTmuxFromTelegram(tmuxName, "[Audio transcription, may contain errors]: "+transcription)
 							}
 						}
 					}
@@ -764,7 +865,7 @@ func listen() error {
 							}
 							prompt := fmt.Sprintf("%s %s", caption, imgPath)
 							sendMessage(config, chatID, threadID, fmt.Sprintf("📷 Image saved, sending to Claude..."))
-							sendToTmuxWithDelay(tmuxName, prompt, 2*time.Second)
+							sendToTmuxFromTelegramWithDelay(tmuxName, prompt, 2*time.Second)
 						}
 					}
 				}
@@ -794,7 +895,7 @@ func listen() error {
 								caption = fmt.Sprintf("%s\n\nFile: %s", caption, destPath)
 							}
 							sendMessage(config, chatID, threadID, fmt.Sprintf("📎 File saved: %s", destPath))
-							sendToTmux(tmuxName, caption)
+							sendToTmuxFromTelegram(tmuxName, caption)
 						}
 					}
 				}
@@ -818,6 +919,30 @@ func listen() error {
 			}
 
 			fmt.Printf("[%s] @%s: %s\n", msg.Chat.Type, msg.From.Username, text)
+
+			// Handle OTP code responses (for permission approval)
+			if isOTPEnabled(config) && !strings.HasPrefix(text, "/") {
+				pendingSession := findPendingOTPSession()
+				if pendingSession != "" {
+					code := strings.TrimSpace(text)
+					if validateOTP(config.OTPSecret, code) {
+						writeOTPResponse(pendingSession, true)
+						delete(otpAttempts, pendingSession)
+						sendMessage(config, chatID, threadID, "✅ Permission approved (valid for 5 min)")
+					} else {
+						otpAttempts[pendingSession]++
+						remaining := 5 - otpAttempts[pendingSession]
+						if remaining <= 0 {
+							writeOTPResponse(pendingSession, false)
+							delete(otpAttempts, pendingSession)
+							sendMessage(config, chatID, threadID, "❌ Too many failed attempts - permission denied")
+						} else {
+							sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Invalid code — %d attempts remaining", remaining))
+						}
+					}
+					continue
+				}
+			}
 
 			// Handle commands
 			if strings.HasPrefix(text, "/c ") {
@@ -1068,7 +1193,7 @@ func listen() error {
 						sendMessage(config, chatID, threadID, fmt.Sprintf("🚀 Session '%s' auto-started", sessName))
 						time.Sleep(3 * time.Second) // Wait for Claude to fully start
 					}
-					if err := sendToTmux(tmuxName, text); err != nil {
+					if err := sendToTmuxFromTelegram(tmuxName, text); err != nil {
 						sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to send: %v", err))
 					}
 				} else {
@@ -1138,7 +1263,6 @@ COMMANDS:
     send <file>             Send file to current session's Telegram topic
     relay [port]            Start relay server for large files (default: 8080)
     run                     Run Claude directly (used by tmux sessions)
-    hook                    Handle Claude hook (internal)
 
 TELEGRAM COMMANDS:
     /new <name>             Create new session with topic (in projects_dir)
@@ -1148,6 +1272,10 @@ TELEGRAM COMMANDS:
     /c <cmd>                Execute shell command
     /update                 Update ccc binary from GitHub
     /restart                Restart ccc service
+
+OTP (permission approval):
+    When OTP is enabled (via 'ccc setup'), Claude's permission requests
+    are forwarded to Telegram. Reply with your OTP code to approve.
 
 FLAGS:
     -h, --help              Show this help
