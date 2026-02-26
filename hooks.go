@@ -90,7 +90,9 @@ func htmlEscape(s string) string {
 func formatToolLines(state *ToolState) string {
 	var lines []string
 	for _, t := range state.Tools {
-		if t.Input != "" {
+		if t.Name == "" {
+			lines = append(lines, fmt.Sprintf("⚙️ %s", htmlEscape(t.Input)))
+		} else if t.Input != "" {
 			lines = append(lines, fmt.Sprintf("⚙️ %s: %s", htmlEscape(t.Name), htmlEscape(t.Input)))
 		} else {
 			lines = append(lines, fmt.Sprintf("⚙️ %s", htmlEscape(t.Name)))
@@ -257,13 +259,9 @@ func handleStopHook() error {
 	hookLog("stop-hook: session=%s claude_session_id=%s transcript=%s", sessName, hookData.SessionID, hookData.TranscriptPath)
 
 	// Clear flags when Claude stops
-	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
+	tmuxName := tmuxSafeName(sessName)
 	os.Remove(telegramActiveFlag(tmuxName))
 	clearThinking(sessName)
-
-	// Collapse tool message if more than 1 tool was called
-	collapseToolMessage(config, sessName, topicID)
-	clearToolState(sessName)
 
 	// Retry extractLastTurn a few times - transcript may not be fully flushed yet
 	var blocks []string
@@ -275,20 +273,34 @@ func handleStopHook() error {
 		time.Sleep(300 * time.Millisecond)
 	}
 	hookLog("stop-hook: extractLastTurn returned %d blocks", len(blocks))
+
+	// Append intermediate text blocks (all but last) to the tool call message,
+	// then collapse it. Only the final block is sent as the response.
+	state := loadToolState(sessName)
+	if state.MsgID != 0 && len(blocks) > 1 {
+		// Prepend intermediate text blocks above tool calls
+		var extra []ToolCall
+		for _, b := range blocks[:len(blocks)-1] {
+			extra = append(extra, ToolCall{Input: truncate(b, 200)})
+		}
+		state.Tools = append(extra, state.Tools...)
+		text := formatToolMessageCollapsed(state)
+		editMessageHTML(config, config.GroupID, state.MsgID, topicID, text)
+	} else {
+		collapseToolMessage(config, sessName, topicID)
+	}
+	clearToolState(sessName)
+
 	if len(blocks) == 0 {
 		// No text blocks found, just send completion marker
 		sendMessage(config, config.GroupID, topicID, fmt.Sprintf("*%s:* ✅", sessName))
 		return nil
 	}
 
-	for i, block := range blocks {
-		hookLog("stop-hook: block[%d] len=%d preview=%s", i, len(block), truncate(block, 80))
-		text := block
-		if i == len(blocks)-1 {
-			text = fmt.Sprintf("*%s:*\n%s", sessName, block)
-		}
-		sendMessageGetID(config, config.GroupID, topicID, text)
-	}
+	// Send only the last block as the response
+	lastBlock := blocks[len(blocks)-1]
+	hookLog("stop-hook: sending final block len=%d preview=%s", len(lastBlock), truncate(lastBlock, 80))
+	sendMessageGetID(config, config.GroupID, topicID, fmt.Sprintf("*%s:*\n%s", sessName, lastBlock))
 
 	return nil
 }
@@ -544,7 +556,7 @@ func handlePermissionHook() error {
 	// OTP only applies when input came from Telegram (flag file exists and is recent).
 	// The listener sets this flag before forwarding Telegram messages to tmux.
 	// Flag auto-expires after 5 minutes to handle cases where stop hook didn't fire.
-	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
+	tmuxName := tmuxSafeName(sessName)
 	flagInfo, err := os.Stat(telegramActiveFlag(tmuxName))
 	if err != nil || time.Since(flagInfo.ModTime()) > otpGrantDuration {
 		return nil // no flag or expired, let Claude handle permissions normally
@@ -673,7 +685,7 @@ func handleUserPromptHook() error {
 
 	// Skip if this prompt came from Telegram (already visible in the chat).
 	// The flag is consumed (deleted) so subsequent TUI prompts are not skipped.
-	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
+	tmuxName := tmuxSafeName(sessName)
 	if flagInfo, err := os.Stat(telegramActiveFlag(tmuxName)); err == nil {
 		if time.Since(flagInfo.ModTime()) < 30*time.Second {
 			os.Remove(telegramActiveFlag(tmuxName))

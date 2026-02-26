@@ -7,25 +7,25 @@ import (
 	"testing"
 )
 
-// TestSessionName tests the sessionName function
-func TestSessionName(t *testing.T) {
+// TestTmuxSafeName tests the tmuxSafeName function
+func TestTmuxSafeName(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{"simple name", "myproject", "claude-myproject"},
-		{"with dash", "my-project", "claude-my-project"},
-		{"with slash", "money/shop", "claude-money/shop"},
-		{"empty", "", "claude-"},
-		{"with spaces", "my project", "claude-my project"},
+		{"simple name", "myproject", "myproject"},
+		{"with dash", "my-project", "my-project"},
+		{"with dot", "my.project", "my_project"},
+		{"empty", "", ""},
+		{"with spaces", "my project", "my project"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := sessionName(tt.input)
+			result := tmuxSafeName(tt.input)
 			if result != tt.expected {
-				t.Errorf("sessionName(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("tmuxSafeName(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -501,25 +501,24 @@ func TestMessageTruncation(t *testing.T) {
 	}
 }
 
-// TestListTmuxSessionsParsing tests the session list parsing logic
-func TestListTmuxSessionsParsing(t *testing.T) {
-	// Test the parsing logic that filters claude- prefixed sessions
-	testData := []struct {
-		sessionName string
-		shouldMatch bool
+// TestWindowNameFromTarget tests extracting window name from tmux target
+func TestWindowNameFromTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   string
+		expected string
 	}{
-		{"claude-myproject", true},
-		{"claude-money/shop", true},
-		{"other-session", false},
-		{"claude-", true},
-		{"notclaude-test", false},
+		{"session:window", "ccc:myproject", "myproject"},
+		{"no colon", "myproject", "myproject"},
+		{"multiple colons", "sess:win:extra", "extra"},
+		{"empty", "", ""},
 	}
 
-	for _, tt := range testData {
-		t.Run(tt.sessionName, func(t *testing.T) {
-			hasPrefix := len(tt.sessionName) >= 7 && tt.sessionName[:7] == "claude-"
-			if hasPrefix != tt.shouldMatch {
-				t.Errorf("prefix check for %q = %v, want %v", tt.sessionName, hasPrefix, tt.shouldMatch)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := windowNameFromTarget(tt.target)
+			if result != tt.expected {
+				t.Errorf("windowNameFromTarget(%q) = %q, want %q", tt.target, result, tt.expected)
 			}
 		})
 	}

@@ -801,20 +801,20 @@ func listen() error {
 						editMessageRemoveKeyboard(config, cb.Message.Chat.ID, cb.Message.MessageID, newText)
 					}
 
-					tmuxName := "claude-" + strings.ReplaceAll(sessionName, ".", "_")
-					if tmuxSessionExists(tmuxName) {
+					tmuxName := tmuxSafeName(sessionName)
+					if tmuxWindowExists(tmuxName) {
 						// Send arrow down keys to select option, then Enter
 						for i := 0; i < optionIndex; i++ {
-							exec.Command(tmuxPath, "send-keys", "-t", tmuxName, "Down").Run()
+							exec.Command(tmuxPath, "send-keys", "-t", tmuxTarget(tmuxName), "Down").Run()
 							time.Sleep(50 * time.Millisecond)
 						}
-						exec.Command(tmuxPath, "send-keys", "-t", tmuxName, "Enter").Run()
+						exec.Command(tmuxPath, "send-keys", "-t", tmuxTarget(tmuxName), "Enter").Run()
 						fmt.Printf("[callback] Selected option %d for %s (question %d/%d)\n", optionIndex, sessionName, questionIndex+1, totalQuestions)
 
 						// After the last question, send Enter to confirm "Submit answers"
 						if totalQuestions > 0 && questionIndex == totalQuestions-1 {
 							time.Sleep(300 * time.Millisecond)
-							exec.Command(tmuxPath, "send-keys", "-t", tmuxName, "Enter").Run()
+							exec.Command(tmuxPath, "send-keys", "-t", tmuxTarget(tmuxName), "Enter").Run()
 							fmt.Printf("[callback] Auto-submitted answers for %s\n", sessionName)
 						}
 					}
@@ -839,8 +839,8 @@ func listen() error {
 				config, _ = loadConfig()
 				sessionName := getSessionByTopic(config, threadID)
 				if sessionName != "" {
-					tmuxName := "claude-" + strings.ReplaceAll(sessionName, ".", "_")
-					if tmuxSessionExists(tmuxName) {
+					tmuxName := tmuxSafeName(sessionName)
+					if tmuxWindowExists(tmuxName) {
 						sendMessage(config, chatID, threadID, "🎤 Transcribing...")
 						// Download and transcribe
 						audioPath := filepath.Join(os.TempDir(), fmt.Sprintf("voice_%d.ogg", time.Now().UnixNano()))
@@ -854,7 +854,7 @@ func listen() error {
 							} else if transcription != "" {
 								fmt.Printf("[voice] @%s: %s\n", msg.From.Username, transcription)
 								sendMessage(config, chatID, threadID, fmt.Sprintf("📝 %s", transcription))
-								sendToTmuxFromTelegram(tmuxName, "[Audio transcription, may contain errors]: "+transcription)
+								sendToTmuxFromTelegram(tmuxTarget(tmuxName), "[Audio transcription, may contain errors]: "+transcription)
 							}
 						}
 					}
@@ -867,8 +867,8 @@ func listen() error {
 				config, _ = loadConfig()
 				sessionName := getSessionByTopic(config, threadID)
 				if sessionName != "" {
-					tmuxName := "claude-" + strings.ReplaceAll(sessionName, ".", "_")
-					if tmuxSessionExists(tmuxName) {
+					tmuxName := tmuxSafeName(sessionName)
+					if tmuxWindowExists(tmuxName) {
 						// Get largest photo (last in array)
 						photo := msg.Photo[len(msg.Photo)-1]
 						imgPath := filepath.Join(os.TempDir(), fmt.Sprintf("telegram_%d.jpg", time.Now().UnixNano()))
@@ -881,7 +881,7 @@ func listen() error {
 							}
 							prompt := fmt.Sprintf("%s %s", caption, imgPath)
 							sendMessage(config, chatID, threadID, fmt.Sprintf("📷 Image saved, sending to Claude..."))
-							sendToTmuxFromTelegramWithDelay(tmuxName, prompt, 2*time.Second)
+							sendToTmuxFromTelegramWithDelay(tmuxTarget(tmuxName), prompt, 2*time.Second)
 						}
 					}
 				}
@@ -893,8 +893,8 @@ func listen() error {
 				config, _ = loadConfig()
 				sessionName := getSessionByTopic(config, threadID)
 				if sessionName != "" {
-					tmuxName := "claude-" + strings.ReplaceAll(sessionName, ".", "_")
-					if tmuxSessionExists(tmuxName) {
+					tmuxName := tmuxSafeName(sessionName)
+					if tmuxWindowExists(tmuxName) {
 						sessionInfo := config.Sessions[sessionName]
 						destDir := sessionInfo.Path
 						if destDir == "" {
@@ -911,7 +911,7 @@ func listen() error {
 								caption = fmt.Sprintf("%s\n\nFile: %s", caption, destPath)
 							}
 							sendMessage(config, chatID, threadID, fmt.Sprintf("📎 File saved: %s", destPath))
-							sendToTmuxFromTelegram(tmuxName, caption)
+							sendToTmuxFromTelegram(tmuxTarget(tmuxName), caption)
 						}
 					}
 				}
@@ -1021,9 +1021,9 @@ func listen() error {
 					sendMessage(config, chatID, threadID, "❌ No session mapped to this topic. Use /new <name> to create one.")
 					continue
 				}
-				tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
-				if tmuxSessionExists(tmuxName) {
-					killTmuxSession(tmuxName)
+				tmuxName := tmuxSafeName(sessName)
+				if tmuxWindowExists(tmuxName) {
+					killTmuxWindow(tmuxName)
 					time.Sleep(300 * time.Millisecond)
 				}
 				// Use the stored path from config, fallback to resolveProjectPath
@@ -1035,11 +1035,11 @@ func listen() error {
 				if _, err := os.Stat(workDir); os.IsNotExist(err) {
 					os.MkdirAll(workDir, 0755)
 				}
-				if err := createTmuxSession(tmuxName, workDir, true); err != nil {
+				if err := createTmuxWindow(tmuxName, workDir, true); err != nil {
 					sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to start: %v", err))
 				} else {
 					time.Sleep(500 * time.Millisecond)
-					if tmuxSessionExists(tmuxName) {
+					if tmuxWindowExists(tmuxName) {
 						sendMessage(config, chatID, threadID, fmt.Sprintf("🔄 Session '%s' restarted with conversation history", sessName))
 					} else {
 						sendMessage(config, chatID, threadID, "⚠️ Session died immediately")
@@ -1057,9 +1057,9 @@ func listen() error {
 					continue
 				}
 				// Kill tmux session
-				tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
-				if tmuxSessionExists(tmuxName) {
-					killTmuxSession(tmuxName)
+				tmuxName := tmuxSafeName(sessName)
+				if tmuxWindowExists(tmuxName) {
+					killTmuxWindow(tmuxName)
 				}
 				// Remove from config
 				topicID := config.Sessions[sessName].TopicID
@@ -1086,9 +1086,9 @@ func listen() error {
 
 				for sessName, info := range config.Sessions {
 					// Kill tmux session
-					tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
-					if tmuxSessionExists(tmuxName) {
-						killTmuxSession(tmuxName)
+					tmuxName := tmuxSafeName(sessName)
+					if tmuxWindowExists(tmuxName) {
+						killTmuxWindow(tmuxName)
 					}
 
 					// NOTE: No longer deleting project folders - only tmux sessions and threads
@@ -1146,12 +1146,12 @@ func listen() error {
 					if _, err := os.Stat(workDir); os.IsNotExist(err) {
 						os.MkdirAll(workDir, 0755)
 					}
-					tmuxName := "claude-" + arg
-					if err := createTmuxSession(tmuxName, workDir, false); err != nil {
+					tmuxName := tmuxSafeName(arg)
+					if err := createTmuxWindow(tmuxName, workDir, false); err != nil {
 						sendMessage(config, config.GroupID, topicID, fmt.Sprintf("❌ Failed to start tmux: %v", err))
 					} else {
 						time.Sleep(500 * time.Millisecond)
-						if tmuxSessionExists(tmuxName) {
+						if tmuxWindowExists(tmuxName) {
 							sendMessage(config, config.GroupID, topicID, fmt.Sprintf("🚀 Session '%s' started!\n\nSend messages here to interact with Claude.", arg))
 						} else {
 							sendMessage(config, config.GroupID, topicID, fmt.Sprintf("⚠️ Session '%s' created but died immediately. Check if ~/bin/ccc works.", arg))
@@ -1167,20 +1167,24 @@ func listen() error {
 						sendMessage(config, chatID, threadID, "❌ No session mapped to this topic. Use /new <name> to create one.")
 						continue
 					}
-					tmuxName := "claude-" + strings.ReplaceAll(sessionName, ".", "_")
-					if tmuxSessionExists(tmuxName) {
-						killTmuxSession(tmuxName)
+					tmuxName := tmuxSafeName(sessionName)
+					if tmuxWindowExists(tmuxName) {
+						killTmuxWindow(tmuxName)
 						time.Sleep(300 * time.Millisecond)
 					}
-					workDir := resolveProjectPath(config, sessionName)
+					sessionInfo := config.Sessions[sessionName]
+					workDir := sessionInfo.Path
+					if workDir == "" {
+						workDir = resolveProjectPath(config, sessionName)
+					}
 					if _, err := os.Stat(workDir); os.IsNotExist(err) {
 						os.MkdirAll(workDir, 0755)
 					}
-					if err := createTmuxSession(tmuxName, workDir, false); err != nil {
+					if err := createTmuxWindow(tmuxName, workDir, false); err != nil {
 						sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to start: %v", err))
 					} else {
 						time.Sleep(500 * time.Millisecond)
-						if tmuxSessionExists(tmuxName) {
+						if tmuxWindowExists(tmuxName) {
 							sendMessage(config, chatID, threadID, fmt.Sprintf("🚀 Session '%s' restarted", sessionName))
 						} else {
 							sendMessage(config, chatID, threadID, "⚠️ Session died immediately")
@@ -1199,22 +1203,22 @@ func listen() error {
 				sessName := getSessionByTopic(config, threadID)
 				if sessName != "" {
 					// Send to tmux session
-					tmuxName := sessionName(sessName)
-					if !tmuxSessionExists(tmuxName) {
+					tmuxName := tmuxSafeName(sessName)
+					if !tmuxWindowExists(tmuxName) {
 						// Auto-start session if not running
 						sessionInfo := config.Sessions[sessName]
 						workDir := sessionInfo.Path
 						if _, err := os.Stat(workDir); os.IsNotExist(err) {
 							os.MkdirAll(workDir, 0755)
 						}
-						if err := createTmuxSession(tmuxName, workDir, false); err != nil {
+						if err := createTmuxWindow(tmuxName, workDir, false); err != nil {
 							sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to start session: %v", err))
 							continue
 						}
 						sendMessage(config, chatID, threadID, fmt.Sprintf("🚀 Session '%s' auto-started", sessName))
 						time.Sleep(3 * time.Second) // Wait for Claude to fully start
 					}
-					if err := sendToTmuxFromTelegram(tmuxName, text); err != nil {
+					if err := sendToTmuxFromTelegram(tmuxTarget(tmuxName), text); err != nil {
 						sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to send: %v", err))
 					}
 				} else {
