@@ -70,8 +70,9 @@ type ToolState struct {
 }
 
 type ToolCall struct {
-	Name  string `json:"name"`
-	Input string `json:"input"`
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+	IsText bool   `json:"is_text,omitempty"` // true for interleaved assistant text
 }
 
 func loadToolState(sessionName string) *ToolState {
@@ -95,14 +96,126 @@ func clearToolState(sessionName string) {
 	os.Remove(toolStatePath(sessionName))
 }
 
-// collapseToolMessage edits the tool message to use expandable blockquote (if >1 tool)
-func collapseToolMessage(config *Config, sessName string, topicID int64) {
-	state := loadToolState(sessName)
-	if state.MsgID == 0 || len(state.Tools) <= 1 {
+// interleaveTextsIntoToolState reads the last assistant message from transcript
+// and inserts text blocks into the tool state at their correct positions.
+// This ensures text that appears before/between tool calls is shown in order.
+func interleaveTextsIntoToolState(state *ToolState, transcriptPath string) {
+	if transcriptPath == "" || len(state.Tools) == 0 {
 		return
 	}
+
+	// Read tail of transcript to find the last assistant message
+	f, err := os.Open(transcriptPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	const tailBytes = 512 * 1024
+	fi, err := f.Stat()
+	if err != nil {
+		return
+	}
+	offset := int64(0)
+	if fi.Size() > tailBytes {
+		offset = fi.Size() - tailBytes
+		f.Seek(offset, 0)
+	}
+	tailData, err := io.ReadAll(f)
+	if err != nil {
+		return
+	}
+	if offset > 0 {
+		if idx := bytes.IndexByte(tailData, '\n'); idx >= 0 {
+			tailData = tailData[idx+1:]
+		}
+	}
+
+	// Find the last assistant message with content blocks
+	type contentBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+		Name string `json:"name"`
+	}
+	type transcriptEntry struct {
+		Type    string `json:"type"`
+		Message struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+
+	var lastContent json.RawMessage
+	for _, line := range bytes.Split(tailData, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry transcriptEntry
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		if entry.Type == "assistant" && entry.Message.Role == "assistant" && len(entry.Message.Content) > 0 {
+			lastContent = entry.Message.Content
+		}
+	}
+	if lastContent == nil {
+		return
+	}
+
+	var blocks []contentBlock
+	if json.Unmarshal(lastContent, &blocks) != nil {
+		return
+	}
+
+	// Build ordered list: walk content blocks, match tool_use to existing tools, insert text blocks
+	var merged []ToolCall
+	toolIdx := 0
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			t := strings.TrimSpace(block.Text)
+			if t != "" && t != "(no content)" {
+				// Truncate long text for display in tool message
+				if len(t) > 200 {
+					t = t[:200] + "..."
+				}
+				merged = append(merged, ToolCall{IsText: true, Input: t})
+			}
+		case "tool_use":
+			if toolIdx < len(state.Tools) {
+				merged = append(merged, state.Tools[toolIdx])
+				toolIdx++
+			}
+		}
+	}
+	// Append any remaining tools not matched
+	for ; toolIdx < len(state.Tools); toolIdx++ {
+		merged = append(merged, state.Tools[toolIdx])
+	}
+
+	state.Tools = merged
+}
+
+// collapseToolMessage edits the tool message to use expandable blockquote (if >1 tool),
+// interleaving any assistant text blocks from the transcript in their correct positions.
+// Returns the text blocks that were interleaved (so they can be skipped by deliverUnsentTexts).
+func collapseToolMessage(config *Config, sessName string, topicID int64, transcriptPath string) []string {
+	state := loadToolState(sessName)
+	if state.MsgID == 0 {
+		return nil
+	}
+	interleaveTextsIntoToolState(state, transcriptPath)
 	text := formatToolMessageCollapsed(state)
 	editMessageHTML(config, config.GroupID, state.MsgID, topicID, text)
+
+	// Collect interleaved text content for dedup
+	var interleaved []string
+	for _, t := range state.Tools {
+		if t.IsText {
+			interleaved = append(interleaved, t.Input)
+		}
+	}
+	return interleaved
 }
 
 // htmlEscape escapes special HTML characters
@@ -117,7 +230,9 @@ func htmlEscape(s string) string {
 func formatToolLines(state *ToolState) string {
 	var lines []string
 	for _, t := range state.Tools {
-		if t.Name == "" {
+		if t.IsText {
+			lines = append(lines, fmt.Sprintf("💬 %s", htmlEscape(t.Input)))
+		} else if t.Name == "" {
 			lines = append(lines, fmt.Sprintf("⚙️ %s", htmlEscape(t.Input)))
 		} else if t.Input != "" {
 			lines = append(lines, fmt.Sprintf("⚙️ %s: %s", htmlEscape(t.Name), htmlEscape(t.Input)))
@@ -290,23 +405,41 @@ func handleStopHook() error {
 	os.Remove(telegramActiveFlag(tmuxName))
 	clearThinking(sessName)
 
-	// Collapse tool message from this turn
-	collapseToolMessage(config, sessName, topicID)
+	// Collapse tool message from this turn, interleaving any text blocks
+	interleavedTexts := collapseToolMessage(config, sessName, topicID, hookData.TranscriptPath)
 	clearToolState(sessName)
 
-	deliverUnsentTexts(config, sessName, topicID, hookData.TranscriptPath)
+	deliverUnsentTexts(config, sessName, topicID, hookData.TranscriptPath, interleavedTexts)
 
 	return nil
 }
 
 // deliverUnsentTexts scans transcript tail and sends any assistant text
 // blocks not yet delivered to Telegram (using ledger dedup).
-func deliverUnsentTexts(config *Config, sessName string, topicID int64, transcriptPath string) int {
+// skipTexts contains text prefixes already interleaved into the tool message.
+func deliverUnsentTexts(config *Config, sessName string, topicID int64, transcriptPath string, skipTexts []string) int {
 	blocks := extractRecentAssistantTexts(transcriptPath, 80)
 	sent := 0
 	for _, block := range blocks {
 		blockID := fmt.Sprintf("reply:%s:%s", block.requestID, contentHash(block.text))
 		if isDelivered(sessName, blockID, "telegram") {
+			continue
+		}
+		// Skip texts already interleaved into tool message
+		skip := false
+		for _, st := range skipTexts {
+			if strings.HasPrefix(block.text, st) || strings.HasPrefix(st, block.text) {
+				skip = true
+				// Mark as delivered in ledger
+				appendMessage(&MessageRecord{
+					ID: blockID, Session: sessName, Type: "assistant_text",
+					Text: truncate(block.text, 500), Origin: "claude",
+					TerminalDelivered: true, TelegramDelivered: true,
+				})
+				break
+			}
+		}
+		if skip {
 			continue
 		}
 		hookLog("deliver-text: rid=%s len=%d preview=%s", block.requestID, len(block.text), truncate(block.text, 80))
@@ -491,9 +624,11 @@ func handlePermissionHook() error {
 	// Persist claude session ID to config for future lookups
 	persistClaudeSessionID(config, sessName, hookData.SessionID)
 
+	hookLog("pre-tool: session=%s tool=%s", sessName, hookData.ToolName)
+
 	// Deliver any unsent assistant text before showing tool calls
 	if topicID != 0 && hookData.TranscriptPath != "" {
-		deliverUnsentTexts(config, sessName, topicID, hookData.TranscriptPath)
+		deliverUnsentTexts(config, sessName, topicID, hookData.TranscriptPath, nil)
 	}
 
 	// Update tool call display
@@ -690,8 +825,8 @@ func handleUserPromptHook() error {
 
 	persistClaudeSessionID(config, sessName, hookData.SessionID)
 
-	// Collapse tool message from previous turn
-	collapseToolMessage(config, sessName, topicID)
+	// Collapse tool message from previous turn (no transcript for interleaving)
+	collapseToolMessage(config, sessName, topicID, "")
 	clearToolState(sessName)
 
 	// Skip if this prompt came from Telegram (already visible in the chat).
