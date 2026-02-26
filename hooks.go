@@ -17,6 +17,20 @@ func telegramActiveFlag(tmuxName string) string {
 	return "/tmp/ccc-telegram-active-" + tmuxName
 }
 
+// thinkingFlag returns the path of the flag file that indicates
+// Claude is actively processing in a session (for typing indicator).
+func thinkingFlag(sessionName string) string {
+	return "/tmp/ccc-thinking-" + sessionName
+}
+
+func setThinking(sessionName string) {
+	os.WriteFile(thinkingFlag(sessionName), []byte("1"), 0600)
+}
+
+func clearThinking(sessionName string) {
+	os.Remove(thinkingFlag(sessionName))
+}
+
 // readHookStdin reads stdin JSON with a timeout
 func readHookStdin() ([]byte, error) {
 	stdinData := make(chan []byte, 1)
@@ -115,9 +129,10 @@ func handleStopHook() error {
 
 	hookLog("stop-hook: session=%s claude_session_id=%s transcript=%s", sessName, hookData.SessionID, hookData.TranscriptPath)
 
-	// Clear Telegram active flag when Claude stops
+	// Clear flags when Claude stops
 	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
 	os.Remove(telegramActiveFlag(tmuxName))
+	clearThinking(sessName)
 
 	// Retry extractLastTurn a few times - transcript may not be fully flushed yet
 	var blocks []string
@@ -507,10 +522,12 @@ func handleUserPromptHook() error {
 	if flagInfo, err := os.Stat(telegramActiveFlag(tmuxName)); err == nil {
 		if time.Since(flagInfo.ModTime()) < 30*time.Second {
 			os.Remove(telegramActiveFlag(tmuxName))
+			setThinking(sessName)
 			return nil
 		}
 	}
 
+	setThinking(sessName)
 	sendMessage(config, config.GroupID, topicID, fmt.Sprintf("💬 %s", hookData.Prompt))
 	return nil
 }

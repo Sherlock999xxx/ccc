@@ -719,6 +719,30 @@ func listen() error {
 		os.Exit(0)
 	}()
 
+	// Typing indicator goroutine: sends "typing" action for sessions with thinking flag
+	go func() {
+		for {
+			time.Sleep(4 * time.Second)
+			cfg, err := loadConfig()
+			if err != nil || cfg == nil {
+				continue
+			}
+			for sessName, info := range cfg.Sessions {
+				if info == nil || info.TopicID == 0 || cfg.GroupID == 0 {
+					continue
+				}
+				if flagInfo, err := os.Stat(thinkingFlag(sessName)); err == nil {
+					// Auto-expire after 10 minutes to handle missed stop hooks
+					if time.Since(flagInfo.ModTime()) > 10*time.Minute {
+						clearThinking(sessName)
+						continue
+					}
+					sendTypingAction(cfg, cfg.GroupID, info.TopicID)
+				}
+			}
+		}
+	}()
+
 	for {
 		reqURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30", config.BotToken, offset)
 		resp, err := telegramClientGet(client, config.BotToken, reqURL)
