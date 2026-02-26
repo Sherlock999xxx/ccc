@@ -20,6 +20,27 @@ import (
 	"github.com/charmbracelet/huh"
 )
 
+// listenLog writes timestamped log entries to ccc.log AND stdout.
+// This ensures logs are always persisted regardless of how the process is started.
+var listenLogFile *os.File
+
+func listenLog(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	line := fmt.Sprintf("[%s] [pid:%d] %s\n", time.Now().Format("2006-01-02 15:04:05"), os.Getpid(), msg)
+	fmt.Print(line)
+	if listenLogFile != nil {
+		listenLogFile.WriteString(line)
+	}
+}
+
+func initListenLog() {
+	logPath := filepath.Join(cacheDir(), "ccc.log")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		listenLogFile = f
+	}
+}
+
 var authInProgress sync.Mutex
 var authWaitingCode bool
 var otpAttempts = make(map[string]int) // session -> failed attempts
@@ -695,14 +716,17 @@ func listen() error {
 	lockFile.Seek(0, 0)
 	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
 
+	initListenLog()
+	if listenLogFile != nil {
+		defer listenLogFile.Close()
+	}
+
 	config, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("not configured. Run: ccc setup <bot_token>")
 	}
 
-	fmt.Printf("Bot listening... (chat: %d, group: %d)\n", config.ChatID, config.GroupID)
-	fmt.Printf("Active sessions: %d\n", len(config.Sessions))
-	fmt.Println("Press Ctrl+C to stop")
+	listenLog("Bot started (chat: %d, group: %d, sessions: %d)", config.ChatID, config.GroupID, len(config.Sessions))
 
 	setBotCommands(config.BotToken)
 
@@ -713,8 +737,8 @@ func listen() error {
 	client := &http.Client{Timeout: 35 * time.Second}
 
 	go func() {
-		<-sigChan
-		fmt.Println("\nShutting down...")
+		sig := <-sigChan
+		listenLog("Shutting down (signal: %v)", sig)
 		os.Exit(0)
 	}()
 
@@ -746,7 +770,7 @@ func listen() error {
 		reqURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30", config.BotToken, offset)
 		resp, err := telegramClientGet(client, config.BotToken, reqURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Network error: %v (retrying...)\n", err)
+			listenLog("Network error: %v (retrying...)", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -756,13 +780,13 @@ func listen() error {
 
 		var updates TelegramUpdate
 		if err := json.Unmarshal(body, &updates); err != nil {
-			fmt.Fprintf(os.Stderr, "Parse error: %v\n", err)
+			listenLog("Parse error: %v", err)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		if !updates.OK {
-			fmt.Fprintf(os.Stderr, "Telegram API error: %s\n", updates.Description)
+			listenLog("Telegram API error: %s", updates.Description)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -809,13 +833,13 @@ func listen() error {
 							time.Sleep(50 * time.Millisecond)
 						}
 						exec.Command(tmuxPath, "send-keys", "-t", tmuxTarget(tmuxName), "Enter").Run()
-						fmt.Printf("[callback] Selected option %d for %s (question %d/%d)\n", optionIndex, sessionName, questionIndex+1, totalQuestions)
+						listenLog("[callback] Selected option %d for %s (question %d/%d)", optionIndex, sessionName, questionIndex+1, totalQuestions)
 
 						// After the last question, send Enter to confirm "Submit answers"
 						if totalQuestions > 0 && questionIndex == totalQuestions-1 {
 							time.Sleep(300 * time.Millisecond)
 							exec.Command(tmuxPath, "send-keys", "-t", tmuxTarget(tmuxName), "Enter").Run()
-							fmt.Printf("[callback] Auto-submitted answers for %s\n", sessionName)
+							listenLog("[callback] Auto-submitted answers for %s", sessionName)
 						}
 					}
 				}
@@ -852,7 +876,7 @@ func listen() error {
 							if err != nil {
 								sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Transcription failed: %v", err))
 							} else if transcription != "" {
-								fmt.Printf("[voice] @%s: %s\n", msg.From.Username, transcription)
+								listenLog("[voice] @%s: %s", msg.From.Username, transcription)
 								sendMessage(config, chatID, threadID, fmt.Sprintf("📝 %s", transcription))
 								sendToTmuxFromTelegram(tmuxTarget(tmuxName), "[Audio transcription, may contain errors]: "+transcription)
 							}
@@ -934,7 +958,7 @@ func listen() error {
 				text = strings.TrimSpace(text)
 			}
 
-			fmt.Printf("[%s] @%s: %s\n", msg.Chat.Type, msg.From.Username, text)
+			listenLog("[%s] @%s: %s", msg.Chat.Type, msg.From.Username, text)
 
 			// Handle OTP code responses (for permission approval)
 			if isOTPEnabled(config) && !strings.HasPrefix(text, "/") {
@@ -1218,7 +1242,10 @@ func listen() error {
 						sendMessage(config, chatID, threadID, fmt.Sprintf("🚀 Session '%s' auto-started", sessName))
 						time.Sleep(3 * time.Second) // Wait for Claude to fully start
 					}
-					if err := sendToTmuxFromTelegram(tmuxTarget(tmuxName), text); err != nil {
+					target := tmuxTarget(tmuxName)
+					listenLog("sendToTmux: target=%s window=%s", target, tmuxName)
+					if err := sendToTmuxFromTelegram(target, text); err != nil {
+						listenLog("sendToTmux FAILED: target=%s err=%v", target, err)
 						sendMessage(config, chatID, threadID, fmt.Sprintf("❌ Failed to send: %v", err))
 					}
 				} else {
