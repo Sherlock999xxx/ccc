@@ -106,7 +106,7 @@ func TestConfigSaveLoad(t *testing.T) {
 	}
 
 	// Verify file exists
-	configPath := filepath.Join(tmpDir, ".ccc.json")
+	configPath := filepath.Join(tmpDir, ".config", "ccc", "config.json")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		t.Fatal("Config file was not created")
 	}
@@ -518,7 +518,7 @@ func TestConfigFilePermissions(t *testing.T) {
 		t.Fatalf("saveConfig failed: %v", err)
 	}
 
-	configPath := filepath.Join(tmpDir, ".ccc.json")
+	configPath := filepath.Join(tmpDir, ".config", "ccc", "config.json")
 	info, err := os.Stat(configPath)
 	if err != nil {
 		t.Fatalf("Failed to stat config file: %v", err)
