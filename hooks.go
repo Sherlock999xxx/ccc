@@ -304,8 +304,14 @@ func handleStopHook() error {
 	clearThinking(sessName)
 
 	// Deliver unsent texts as separate messages (these come after all tools)
+	// Retry briefly if nothing found — transcript may not be flushed yet when stop hook fires.
 	hookLog("stop-hook: delivering unsent texts")
 	sent := deliverUnsentTexts(config, sessName, topicID, hookData.TranscriptPath, false)
+	if sent == 0 {
+		hookLog("stop-hook: sent=0, retrying after 1s (transcript flush race)")
+		time.Sleep(1 * time.Second)
+		sent = deliverUnsentTexts(config, sessName, topicID, hookData.TranscriptPath, false)
+	}
 	hookLog("stop-hook: sent=%d", sent)
 	clearToolState(sessName)
 
