@@ -729,9 +729,9 @@ func handleNotificationHook() error {
 
 	persistClaudeSessionID(config, sessName, hookData.SessionID)
 
-	// Skip noisy/useless notification types
-	switch hookData.NotificationType {
-	case "idle_prompt":
+	// idle_prompt means Claude is waiting for user input — clear typing indicator
+	if hookData.NotificationType == "idle_prompt" {
+		clearThinking(sessName)
 		return nil
 	}
 

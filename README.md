@@ -321,9 +321,26 @@ systemctl --user start ccc
 
 </details>
 
+## File Locations
+
+| Path | Description |
+|------|-------------|
+| `~/.config/ccc/config.json` | Configuration file (bot token, sessions, settings) |
+| `~/Library/Caches/ccc/` | Runtime state and logs (macOS) |
+| `~/Library/Caches/ccc/ccc.log` | Listener output log |
+| `~/Library/Caches/ccc/hook-debug.log` | Hook debug log (tool calls, stop hook, etc.) |
+| `~/Library/Caches/ccc/ccc.lock` | Listener lock file (prevents duplicate instances) |
+| `~/Library/Caches/ccc/tools-*.json` | Per-session tool call display state |
+| `~/Library/Caches/ccc/thinking-*` | Per-session typing indicator flags |
+| `~/Library/Caches/ccc/telegram-active-*` | Flags indicating Telegram-initiated input |
+| `~/bin/ccc` | Binary (default install location) |
+| `~/.claude/settings.json` | Claude Code hooks are installed here |
+
+> **Debugging tip**: `tail -f ~/Library/Caches/ccc/hook-debug.log` to watch hook activity in real time.
+
 ## Configuration
 
-Config is stored in `~/.ccc.json`:
+Config is stored in `~/.config/ccc/config.json` (migrated automatically from `~/.ccc.json` if present):
 
 ```json
 {
@@ -378,7 +395,7 @@ Now `/new myproject` creates `~/Projects/myproject`.
 
 ### Transcription Setup
 
-Voice messages require a transcription backend. Configure via `transcription_cmd` in `~/.ccc.json`:
+Voice messages require a transcription backend. Configure via `transcription_cmd` in `~/.config/ccc/config.json`:
 
 ```json
 {
@@ -407,7 +424,7 @@ chmod +x ~/bin/transcribe-groq
 nano ~/bin/transcribe-groq
 # Set: GROQ_API_KEY="gsk_your_key_here"
 
-# 3. Add to ~/.ccc.json
+# 3. Add to ~/.config/ccc/config.json
 "transcription_cmd": "~/bin/transcribe-groq"
 ```
 
@@ -443,7 +460,7 @@ To start fresh with an existing project, use `/new` in the topic or create a new
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │  Telegram   │────▶│     ccc     │────▶│    tmux     │
-│   (phone)   │◀────│   listen    │◀────│   session   │
+│   (phone)   │◀────│   listen    │◀────│   windows   │
 └─────────────┘     └─────────────┘     └─────────────┘
                            │                   │
                            │                   ▼
@@ -453,9 +470,10 @@ To start fresh with an existing project, use `/new` in the topic or create a new
 ```
 
 1. `ccc listen` runs as a service, polling Telegram for messages
-2. Messages in topics are forwarded to the corresponding tmux session
-3. Claude Code runs inside tmux with a hook that sends responses back
+2. Messages in topics are forwarded to the corresponding tmux window
+3. Claude Code runs inside tmux with hooks that send responses back
 4. You can attach to any session from terminal with `ccc`
+5. All sessions run as windows in a shared tmux session
 
 ## Privacy & Security
 
@@ -475,7 +493,7 @@ The only external communication is:
 ### Security
 
 - **Authorization**: Bot only accepts messages from the configured `chat_id`
-- **Config permissions**: `~/.ccc.json` is created with `0600` (owner-only)
+- **Config permissions**: `~/.config/ccc/config.json` is created with `0600` (owner-only)
 - **Open source**: Full code transparency, audit it yourself
 
 ### Permission Modes
@@ -521,8 +539,9 @@ This checks tmux, claude, config, hooks, and service status.
 
 **Bot not responding?**
 - Check if `ccc listen` is running: `systemctl --user status ccc`
-- Verify bot token in `~/.ccc.json`
-- Check logs: `journalctl --user -u ccc -f`
+- Verify bot token in `~/.config/ccc/config.json`
+- Check logs: `tail -f ~/Library/Caches/ccc/ccc.log` (macOS) or `journalctl --user -u ccc -f` (Linux)
+- Check hook logs: `tail -f ~/Library/Caches/ccc/hook-debug.log`
 
 **Session not starting?**
 - Ensure tmux is installed: `which tmux`
@@ -536,7 +555,7 @@ This checks tmux, claude, config, hooks, and service status.
 **Session dies immediately?**
 - Check `ccc doctor` output
 - Verify Claude can start: `claude --version`
-- Check tmux session: `tmux list-sessions`
+- Check tmux windows: `tmux list-windows -a`
 
 ## Contributing
 
