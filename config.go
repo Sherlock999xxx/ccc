@@ -7,9 +7,35 @@ import (
 	"strings"
 )
 
-func getConfigPath() string {
+// configDir returns ~/.config/ccc (created if needed)
+func configDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".ccc.json")
+	dir := filepath.Join(home, ".config", "ccc")
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// cacheDir returns ~/Library/Caches/ccc (created if needed)
+func cacheDir() string {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, "Library", "Caches", "ccc")
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+func getConfigPath() string {
+	// Migrate from old path if needed
+	home, _ := os.UserHomeDir()
+	oldPath := filepath.Join(home, ".ccc.json")
+	newPath := filepath.Join(configDir(), "config.json")
+	if _, err := os.Stat(newPath); os.IsNotExist(err) {
+		if _, err := os.Stat(oldPath); err == nil {
+			data, _ := os.ReadFile(oldPath)
+			os.WriteFile(newPath, data, 0600)
+			os.Remove(oldPath)
+		}
+	}
+	return newPath
 }
 
 func loadConfig() (*Config, error) {

@@ -14,13 +14,13 @@ import (
 // telegramActiveFlag returns the path of the flag file that indicates
 // a Telegram message is being processed by a tmux session.
 func telegramActiveFlag(tmuxName string) string {
-	return "/tmp/ccc-telegram-active-" + tmuxName
+	return filepath.Join(cacheDir(), "telegram-active-"+tmuxName)
 }
 
 // thinkingFlag returns the path of the flag file that indicates
 // Claude is actively processing in a session (for typing indicator).
 func thinkingFlag(sessionName string) string {
-	return "/tmp/ccc-thinking-" + sessionName
+	return filepath.Join(cacheDir(), "thinking-"+sessionName)
 }
 
 func setThinking(sessionName string) {
@@ -779,7 +779,7 @@ func truncate(s string, n int) string {
 
 // hookLog writes debug log entries
 func hookLog(format string, args ...interface{}) {
-	f, err := os.OpenFile("/tmp/ccc-hook-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filepath.Join(cacheDir(), "hook-debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}

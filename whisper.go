@@ -21,8 +21,7 @@ const whisperModelName = "ggml-small.bin"
 const whisperModelURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
 func getModelsDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".ccc", "models")
+	return filepath.Join(cacheDir(), "models")
 }
 
 // ensureModel downloads the whisper model if not present

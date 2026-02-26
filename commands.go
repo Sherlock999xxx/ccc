@@ -208,7 +208,7 @@ func stopListenerService() {
 		exec.Command("systemctl", "--user", "stop", "ccc").Run()
 	}
 	// Also kill any manual listener via lock file PID
-	lockPath := filepath.Join(home, ".ccc.lock")
+	lockPath := filepath.Join(cacheDir(), "ccc.lock")
 	if data, err := os.ReadFile(lockPath); err == nil {
 		pidStr := strings.TrimSpace(string(data))
 		if pidStr != "" {
@@ -676,8 +676,7 @@ func listen() error {
 	time.Sleep(time.Duration(os.Getpid()%500) * time.Millisecond)
 
 	// Use a lock file to ensure only one instance runs
-	home, _ := os.UserHomeDir()
-	lockPath := filepath.Join(home, ".ccc.lock")
+	lockPath := filepath.Join(cacheDir(), "ccc.lock")
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open lock file: %w", err)

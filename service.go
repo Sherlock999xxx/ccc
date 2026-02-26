@@ -26,7 +26,7 @@ func installLaunchdService(home string) error {
 	}
 
 	plistPath := filepath.Join(plistDir, "com.ccc.plist")
-	logPath := filepath.Join(home, ".ccc.log")
+	logPath := filepath.Join(cacheDir(), "ccc.log")
 
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

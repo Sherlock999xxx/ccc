@@ -13,10 +13,10 @@ import (
 	"github.com/pquerna/otp/totp"
 )
 
-// OTP permission request/response files live in /tmp
-const otpRequestPrefix = "/tmp/ccc-otp-request-"
-const otpResponsePrefix = "/tmp/ccc-otp-response-"
-const otpGrantPrefix = "/tmp/ccc-otp-grant-"
+// OTP permission request/response files
+var otpRequestPrefix = filepath.Join(cacheDir(), "otp-request-")
+var otpResponsePrefix = filepath.Join(cacheDir(), "otp-response-")
+var otpGrantPrefix = filepath.Join(cacheDir(), "otp-grant-")
 const otpGrantDuration = 5 * time.Minute
 const otpPermissionTimeout = 5 * time.Minute
 
