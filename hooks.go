@@ -501,6 +501,14 @@ func handleUserPromptHook() error {
 
 	persistClaudeSessionID(config, sessName, hookData.SessionID)
 
+	// Skip if this prompt came from Telegram (already visible in the chat)
+	tmuxName := "claude-" + strings.ReplaceAll(sessName, ".", "_")
+	if flagInfo, err := os.Stat(telegramActiveFlag(tmuxName)); err == nil {
+		if time.Since(flagInfo.ModTime()) < 5*time.Minute {
+			return nil
+		}
+	}
+
 	sendMessage(config, config.GroupID, topicID, fmt.Sprintf("💬 %s", hookData.Prompt))
 	return nil
 }
